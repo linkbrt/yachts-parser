@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime as dt
 from multiprocessing.dummy import Pool as ThreadPool
 
@@ -15,19 +16,22 @@ BRANDS_URLS = [
     "https://yacht-parts.ru/info/brands/?PAGEN_1=3",
 ]
 
+OUTPUT_FOLDER = "output"
+LOGS_FOLDER = "logs"
+
 
 # Парсинг страницы каталога для получения всех категорий товаров
 def parse_catalog() -> dict[str, str]:
+    result = {}
     try:
         resp = requests.get(CATALOG_URL)
         soup = BeautifulSoup(resp.text, "html.parser")
 
         sections = soup.find_all("div", "section_item")
-        result = {}
         for item in sections:
             category_name = item.find("li").a.span.text
             result[category_name] = [item.a.get('href') for item in item.find_all("li", "sect")]
-
+        logging.info("Каталог успешно получен")
     except Exception as e:
         logging.exception(e)
     return result
@@ -35,6 +39,7 @@ def parse_catalog() -> dict[str, str]:
 
 # Парсинг каждой категории для получения кол-ва страниц пагинатора
 def parse_page_numbers(url: str) -> tuple[str, int]:
+    num = 1
     try:
         resp = requests.get(BASE_URL + url)
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -42,7 +47,7 @@ def parse_page_numbers(url: str) -> tuple[str, int]:
             num = int([item for item in soup.find("span", "nums")][-2].text)
         except TypeError:
             num = 1
-        logging.info(f"Получил кол-во страниц {url}")
+        logging.info(f"Получил кол-во страниц {resp.url}")
 
     except Exception as e:
         logging.exception(e)
@@ -52,11 +57,12 @@ def parse_page_numbers(url: str) -> tuple[str, int]:
 
 # Парсинг адресов предметов на странице
 def parse_page(data: tuple[str, int]) -> list[str]:
+    items = []
     try:
-        resp = requests.get(BASE_URL + data[0], params={"?PAGEN_1": data[1]})
+        resp = requests.get(BASE_URL + data[0], params={"PAGEN_1": data[1]})
         soup = BeautifulSoup(resp.text, "html.parser")
         items = [item.a.get('href') for item in soup.find_all("div", "item-title")]
-        logging.info(f"Page parsed: {data[0]}?PAGEN_1={data[1]}")
+        logging.info(f"Page parsed: {resp.url}")
 
     except Exception as e:
         logging.exception(e)
@@ -66,7 +72,13 @@ def parse_page(data: tuple[str, int]) -> list[str]:
 
 # Парсинг предмета
 def parse_item(url: str) -> dict[str, str]:
-    result = {}
+    result = {
+        "title": "",
+        "price": "",
+        "article": "",
+        "description": "",
+        "images": [],
+    }
     try:
         resp = requests.get(BASE_URL + url)
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -76,7 +88,7 @@ def parse_item(url: str) -> dict[str, str]:
         article = soup.find("div", "article iblock").find("span", "value").text
         description = soup.find("div", "preview_text").text.strip()
         images = soup.find("div", "slides").find_all("img")
-        logging.info(f"Item parsed: {url}")
+        logging.info(f"Item parsed: {resp.url}")
         result = {
             "title": title,
             "price": price,
@@ -93,6 +105,7 @@ def parse_item(url: str) -> dict[str, str]:
 
 # Парсинг существующих брендов
 def parse_brands(url: str) -> list[str]:
+    brand_list = []
     try: 
         resp = requests.get(url)
         soup = BeautifulSoup(resp.text, "html.parser")
@@ -100,7 +113,7 @@ def parse_brands(url: str) -> list[str]:
             lambda item: item["title"], 
             [item.find("img") for item in soup.find("ul", "brands_list")][1:-1:2]
         ))
-
+        logging.info("Бренды успешно получены")
     except Exception as e:
         logging.exception(e)
 
@@ -112,18 +125,17 @@ def parse_items_and_save(filename: str, catalog: dict[str, str], brands: list[st
     workbook = Workbook() 
 
     for key in catalog:
+        logging.info(f"Обработка: {key}")
         urls_with_nums = pool.map(parse_page_numbers, catalog[key])
         workbook_name = key[:31] # Название листа должно содержать < 31 символа
         workbook.create_sheet(workbook_name)
         sheet = workbook[workbook_name]
-        all_urls = []
         items = []
         for url, num in urls_with_nums:
-            all_urls += pool.map(parse_page, [(url, i) for i in range(num)])
+            all_urls = pool.map(parse_page, [(url, i) for i in range(1, num+1)])
             for page in all_urls:
                 items += pool.map(parse_item, [item for item in page])
-                break
-            break
+
         sheet.cell(1, 1, "Название")
         sheet.cell(1, 2, "Бренд")
         sheet.cell(1, 3, "Категория")
@@ -144,19 +156,25 @@ def parse_items_and_save(filename: str, catalog: dict[str, str], brands: list[st
             sheet.cell(i, 5, item.get("article"))
             sheet.cell(i, 6, item.get("description"))
             sheet.cell(i, 7, ', '.join(item.get("images", [])))
-        break
+        workbook.save(f"{OUTPUT_FOLDER}/{filename}")
 
     del workbook["Sheet"]
-    workbook.save("output/" + filename)
+
+    workbook.save(f"{OUTPUT_FOLDER}/{filename}")
 
 
 if __name__== '__main__':
+    if not os.path.isdir(OUTPUT_FOLDER):
+        os.mkdir(OUTPUT_FOLDER)
+    if not os.path.isdir(LOGS_FOLDER):
+        os.mkdir(LOGS_FOLDER)
+
     start_time = dt.now()
     pool = ThreadPool(8)
     logging.basicConfig(
         level=logging.INFO,
         format="{asctime} - {levelname} - {message}", 
-        filename="logs/app.log",
+        filename=f"{LOGS_FOLDER}/app.log",
         style="{",
         filemode="a")
 
